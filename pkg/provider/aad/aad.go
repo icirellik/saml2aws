@@ -673,21 +673,20 @@ func (ac *Client) processConvergedProofUpRedirect(res *http.Response, srcBodyStr
 		return res, errors.Wrap(err, "skip MFA response unmarshal error")
 	}
 
+	if convergedResponse.URLSkipMfaRegistration != "" {
+		res, err = ac.client.Get(convergedResponse.URLSkipMfaRegistration)
+		if err != nil {
+			return res, errors.Wrap(err, "error processing skip MFA request")
+		}
+		return res, nil
+	}
+
 	// 50058: user is not signed in (yet)
 	if convergedResponse.SErrorCode != "" && convergedResponse.SErrorCode != "50058" {
 		return res, fmt.Errorf("login error %s", convergedResponse.SErrorCode)
 	}
 
-	if convergedResponse.URLSkipMfaRegistration == "" {
-		return res, errors.Wrap(err, "skip MFA not possible")
-	}
-
-	res, err = ac.client.Get(convergedResponse.URLSkipMfaRegistration)
-	if err != nil {
-		return res, errors.Wrap(err, "error processing skip MFA request")
-	}
-
-	return res, nil
+	return res, errors.New("skip MFA not possible")
 }
 
 func (ac *Client) unmarshalEmbeddedJson(resBodyStr string, v any) error {
