@@ -37,6 +37,7 @@ type ConvergedResponse struct {
 	URLGetCredentialType     string             `json:"urlGetCredentialType"`
 	ArrUserProofs            []userProof        `json:"arrUserProofs"`
 	URLSkipMfaRegistration   string             `json:"urlSkipMfaRegistration"`
+	URLPostRedirect          string             `json:"urlPostRedirect"`
 	OPerAuthPollingInterval  map[string]float64 `json:"oPerAuthPollingInterval"`
 	URLBeginAuth             string             `json:"urlBeginAuth"`
 	URLEndAuth               string             `json:"urlEndAuth"`
@@ -47,6 +48,7 @@ type ConvergedResponse struct {
 	SFT                      string             `json:"sFT"`
 	SFTName                  string             `json:"sFTName"`
 	SCtx                     string             `json:"sCtx"`
+	ProofUpAuthState         string             `json:"sProofUpAuthState"`
 	Hpgact                   int                `json:"hpgact"`
 	Hpgid                    int                `json:"hpgid"`
 	Pgid                     string             `json:"pgid"`
@@ -674,6 +676,28 @@ func (ac *Client) processConvergedProofUpRedirect(res *http.Response, srcBodyStr
 	}
 
 	if convergedResponse.URLSkipMfaRegistration != "" {
+		if canProcessProofUpSkip(convergedResponse) {
+			formValues := url.Values{}
+			formValues.Set("type", "22")
+			formValues.Set("request", convergedResponse.ProofUpAuthState)
+			formValues.Set(convergedResponse.SFTName, convergedResponse.SFT)
+			formValues.Set("ctx", convergedResponse.ProofUpAuthState)
+			formValues.Set("canary", convergedResponse.Canary)
+			formValues.Set("hpgrequestid", convergedResponse.CorrelationID)
+
+			req, err := http.NewRequest("POST", ac.fullUrl(res, convergedResponse.URLPostRedirect), strings.NewReader(formValues.Encode()))
+			if err != nil {
+				return res, errors.Wrap(err, "error building skip MFA registration request")
+			}
+			req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+			res, err = ac.client.Do(req)
+			if err != nil {
+				return res, errors.Wrap(err, "error processing skip MFA registration request")
+			}
+			return res, nil
+		}
+
 		res, err = ac.client.Get(convergedResponse.URLSkipMfaRegistration)
 		if err != nil {
 			return res, errors.Wrap(err, "error processing skip MFA request")
@@ -687,6 +711,25 @@ func (ac *Client) processConvergedProofUpRedirect(res *http.Response, srcBodyStr
 	}
 
 	return res, errors.New("skip MFA not possible")
+}
+
+func canProcessProofUpSkip(convergedResponse *ConvergedResponse) bool {
+	if convergedResponse == nil ||
+		convergedResponse.URLPostRedirect == "" ||
+		convergedResponse.ProofUpAuthState == "" ||
+		convergedResponse.SFTName == "" ||
+		convergedResponse.SFT == "" ||
+		convergedResponse.Canary == "" ||
+		convergedResponse.CorrelationID == "" {
+		return false
+	}
+
+	switch convergedResponse.SFTName {
+	case "type", "request", "ctx", "canary", "hpgrequestid":
+		return false
+	default:
+		return true
+	}
 }
 
 func (ac *Client) unmarshalEmbeddedJson(resBodyStr string, v any) error {

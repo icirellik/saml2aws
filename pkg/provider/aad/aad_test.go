@@ -273,6 +273,8 @@ func Test_Authenticate(t *testing.T) {
 		require.NotEmpty(t, got)
 	})
 	t.Run("Default login with snoozable MFA registration", func(t *testing.T) {
+		fixtureData := genFixtureData()
+		skipRequests := make(chan url.Values, 1)
 		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/index", "/applications/redirecttofederatedapplication.aspx":
@@ -285,12 +287,24 @@ func Test_Authenticate(t *testing.T) {
 			case "/defaultLogin":
 				writeFixtureBytes(t, w, r, "ConvergedProofUpRedirect.html", FixtureData{
 					SErrorCode:             "50203",
-					UrlSkipMfaRegistration: "/skipMfaRegistration",
+					UrlProcessAuth:         "/skipMfaRegistration",
+					UrlSkipMfaRegistration: "/legacySkipMfaRegistration",
 				})
 			case "/skipMfaRegistration":
+				if r.Method != http.MethodPost {
+					http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+					return
+				}
+				if err := r.ParseForm(); err != nil {
+					http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+					return
+				}
+				skipRequests <- r.PostForm
 				writeFixtureBytes(t, w, r, "KmsiInterrupt.html", FixtureData{
 					UrlPost: "/hForm",
 				})
+			case "/legacySkipMfaRegistration":
+				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			case "/hForm":
 				writeFixtureBytes(t, w, r, "HiddenForm.html", FixtureData{
 					UrlHiddenForm: "/sRequest",
@@ -311,6 +325,14 @@ func Test_Authenticate(t *testing.T) {
 		got, err := ac.Authenticate(loginDetails)
 		require.Nil(t, err)
 		require.NotEmpty(t, got)
+		require.Equal(t, url.Values{
+			"type":         []string{"22"},
+			"request":      []string{fixtureData.Ctx},
+			"flowToken":    []string{fixtureData.SFT},
+			"ctx":          []string{fixtureData.Ctx},
+			"canary":       []string{fixtureData.Canary + "=6:1"},
+			"hpgrequestid": []string{fixtureData.ClientRequestId},
+		}, <-skipRequests)
 	})
 	t.Run("Default login with KMSI and MFA", func(t *testing.T) {
 		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -677,6 +699,46 @@ func Test_processMfaAuth(t *testing.T) {
 			result := <-requestResults
 			require.NoError(t, result.err)
 			require.Equal(t, testCase.expectedForm, result.form)
+		})
+	}
+}
+
+func Test_canProcessProofUpSkip(t *testing.T) {
+	newResponse := func() ConvergedResponse {
+		return ConvergedResponse{
+			URLPostRedirect:  "https://login.microsoftonline.com/common/SAS/ProcessAuth",
+			ProofUpAuthState: "proof-up-state",
+			SFTName:          "flowToken",
+			SFT:              "flow-token",
+			Canary:           "canary",
+			CorrelationID:    "correlation-id",
+		}
+	}
+
+	complete := newResponse()
+	require.True(t, canProcessProofUpSkip(&complete))
+
+	missingValues := map[string]func(*ConvergedResponse){
+		"post redirect URL": func(response *ConvergedResponse) { response.URLPostRedirect = "" },
+		"proof-up state":    func(response *ConvergedResponse) { response.ProofUpAuthState = "" },
+		"flow token name":   func(response *ConvergedResponse) { response.SFTName = "" },
+		"flow token":        func(response *ConvergedResponse) { response.SFT = "" },
+		"canary":            func(response *ConvergedResponse) { response.Canary = "" },
+		"correlation ID":    func(response *ConvergedResponse) { response.CorrelationID = "" },
+	}
+	for name, removeValue := range missingValues {
+		t.Run("missing "+name, func(t *testing.T) {
+			response := newResponse()
+			removeValue(&response)
+			require.False(t, canProcessProofUpSkip(&response))
+		})
+	}
+
+	for _, reservedName := range []string{"type", "request", "ctx", "canary", "hpgrequestid"} {
+		t.Run("reserved "+reservedName, func(t *testing.T) {
+			response := newResponse()
+			response.SFTName = reservedName
+			require.False(t, canProcessProofUpSkip(&response))
 		})
 	}
 }
